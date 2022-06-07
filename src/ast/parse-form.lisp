@@ -229,8 +229,6 @@ This does not attempt to do any sort of analysis whatsoever. It is suitable for 
 (defun parse-match-branch (branch m package)
   (declare (type immutable-map m)
            (type package package))
-  (assert (<= 2 (length branch))
-          () "Malformed match branch ~A" branch)
   (let* ((parsed-pattern (parse-pattern (first branch)))
          (pattern-vars (pattern-variables parsed-pattern))
          (local-vars (make-local-vars pattern-vars package))

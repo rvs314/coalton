@@ -160,8 +160,11 @@ in FORMS that begin with that operator."
      (process-coalton-toplevel ',toplevel-forms *package* *global-environment*)
      (values)))
 
-(defmacro coalton:coalton (form)
-  (let ((parsed-form (parse-form form (make-immutable-map) *package*)))
+(defmacro coalton:coalton (&body forms)
+  (let* ((form (cond ((null forms) (return-from coalton:coalton))
+                     ((cdr forms)  (cons 'coalton:progn forms))
+                     (t            (car forms))))
+         (parsed-form (parse-form form (make-immutable-map) *package*)))
     (coalton-impl/typechecker::with-type-context ("COALTON")
       (multiple-value-bind (type preds typed-node substs)
           (derive-expression-type parsed-form *global-environment* nil)

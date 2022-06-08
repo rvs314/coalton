@@ -62,6 +62,7 @@
    #:min!
    #:every!
    #:any!
+   #:last!
    #:collect-list!
    #:collect-vector-size-hint!
    #:collect-vector!
@@ -184,7 +185,7 @@ iterator is empty."
                              :num ->
                              :num ->
                              :num ->
-                            (Iterator :num)))
+                             (Iterator :num)))
   (define (range-decreasing step start end)
     "A range which begins below START and counts down through and including END by STEP.
 
@@ -198,8 +199,8 @@ Equivalent to reversing `range-increasing`"
     ;; FIXME: avoid underflow in the DONE? test
     (recursive-iter ((flip -) step)
                     (fn (n) (>= end (+ n step))) ; like (>= (- end step)), but without potential underflow
-                    (- start step)               ; begin after START
-                    ))
+                    (- start step)))               ; begin after START
+                    
 
   (declare down-from ((Num :num) (Ord :num) => :num -> Iterator :num))
   (define (down-from limit)
@@ -420,6 +421,19 @@ Returns `True` if ITER is empty."
 
 Returns `False` if ITER is empty."
     (isSome (find! good? iter)))
+
+  (declare last! (Iterator :elt -> Optional :elt))
+  (define (last! iter)
+    "Return the last element of ITER (if one exists), completely consuming ITER"
+    (map (fn (init)
+           (let most-recent = (cell:new init))
+           (let ((run (fn ()
+                        (match (next! iter)
+                          ((Some v) (progn (cell:write! most-recent v)
+                                           (run)))
+                          ((None)   (cell:read most-recent))))))
+             (run)))
+         (next! iter)))
 
 ;;; collecting
   ;; as with `IntoIterator`, these will one day be abstracted into a class `(FromIterator :collection :item)'.

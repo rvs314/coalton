@@ -24,6 +24,11 @@
    #:literal-value                      ; TYPE
    #:maphash-values-new                 ; FUNCTION
    #:find-symbol?                       ; FUNCTION
+   #:duplicates                         ; FUNCTION
+   #:define-list-of-type                ; MACRO
+   #:cut                                ; MACRO
+   #:<>                                 ; SYMBOL
+   #:<...>                              ; SYMBOL
    ))
 
 (uiop:define-package #:coalton-impl/algorithm

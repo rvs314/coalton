@@ -20,43 +20,41 @@
 
   (docstring         (required 'docstring)         :type (or null string)       :read-only t))
 
-#+(and sbcl coalton-release)
-(declaim (sb-ext:freeze-type type-definition))
+(defstruct partial-type-definition 
+  "A type which is incomplete and still needs to be defined"
+  (name         (required 'name)         :type list           :read-only t)
+  (docstring    (required 'docstring)    :type (or null string) :read-only t)
+  (constructors (required 'constructors) :type list             :read-only t))
 
-(defstruct (partial-define-type (:constructor partial-define-type))
-  (name         (required 'name)         :type symbol           :read-only t)
-  (tyvar-names  (required 'tyvar-names)  :type symbol-list      :read-only t)
-  (constructors (required 'constructors) :type list             :read-only t)
-  (docstring    (required 'docstring)    :type (or null string) :read-only t))
+(defstruct alias-definition
+  "The result of parsing, but not type-checking, a DEFINE-ALIAS form"
+  (alias     (required 'alias)     :type cons)
+  (docstring (required 'docstring) :type (or null string))
+  (aliased   (required 'aliased)   :type (or symbol cons)))
 
-#+(and sbcl coalton-release)
-(declaim (sb-ext:freeze-type partial-define-type))
+(define-list-of-type type-definition)
+(define-list-of-type partial-type-definition)
+(define-list-of-type alias-definition)
 
-(defun partial-define-type-list-p (x)
-  (and (alexandria:proper-list-p x)
-       (every #'partial-define-type-p x)))
-
-(deftype partial-define-type-list ()
-  '(satisfies partial-define-type-list-p))
-
-(defun type-definition-list-p (x)
-  (and (alexandria:proper-list-p x)
-       (every #'type-definition-p x)))
-
-(deftype type-definition-list ()
-  '(satisfies type-definition-list-p))
+(defun definition-name (thing)
+  (declare (type (or alias-definition partial-type-definition type-definition) thing)
+           (values symbol))
+  (typecase thing
+    (alias-definition        (car (alias-definition-alias thing)))
+    (partial-type-definition (car (partial-type-definition-name thing)))
+    (type-definition         (type-definition-name thing))))
 
 (defun parse-type-definition (partial-type self-type type-vars ksubs env)
-  (declare (type partial-define-type partial-type)
+  (declare (type partial-type-definition partial-type)
            (type ty self-type)
            (type list type-vars)
            (type ksubstitution-list ksubs)
            (type environment env)
            (values list list ksubstitution-list))
 
-  (let* ((tyvar-names (partial-define-type-tyvar-names partial-type))
+  (let* ((tyvar-names (cdr (partial-type-definition-name partial-type)))
 
-         (unparsed-ctors (partial-define-type-constructors partial-type))
+         (unparsed-ctors (partial-type-definition-constructors partial-type))
 
          (local-type-vars
            (loop :for tyvar-name :in tyvar-names
@@ -97,10 +95,10 @@
 
 (defun parse-type-impls (partial-types env)
   "Parse the PARTIAL-TYPES in a single scc"
-  (declare (type partial-define-type-list partial-types)
+  (declare (type partial-type-definition-list partial-types)
            (type environment env))
 
-  (let* ((type-names (mapcar #'partial-define-type-name partial-types))
+  (let* ((type-names (mapcar #'partial-type-definition-name partial-types))
 
          (type-vars
            (loop :for type-name :in type-names
@@ -114,7 +112,7 @@
 
          (type-constructors
            (loop :for partial-type :in partial-types
-                 :for self-type := (second (find (partial-define-type-name partial-type) type-vars :key #'first))
+                 :for self-type := (second (find (partial-type-definition-name partial-type) type-vars :key #'first))
                  :collect (multiple-value-bind (constructors local-tyvars new-ksubs)
                               (parse-type-definition partial-type self-type type-vars ksubs env)
                             (setf ksubs new-ksubs)
@@ -185,12 +183,68 @@
            (type symbol ctor-name)
            (type environment env))
   
-   (with-type-context ("define-type of ~S" ty-name)
-    (let ((ctor-entry (lookup-constructor env ctor-name :no-error t)))
-      (when (and ctor-entry (not (eq ty-name (constructor-entry-constructs ctor-entry))))
-        (error 'duplicate-ctor
-               :ctor-name ctor-name
-               :ty-name (constructor-entry-constructs ctor-entry))))))
+  (with-type-context ("define-type of ~S" ty-name)
+   (let ((ctor-entry (lookup-constructor env ctor-name :no-error t)))
+     (when (and ctor-entry (not (eq ty-name (constructor-entry-constructs ctor-entry))))
+       (error 'duplicate-ctor
+              :ctor-name ctor-name
+              :ty-name (constructor-entry-constructs ctor-entry))))))
+
+(defmacro assert-parsing (form assertion &body error-arguments)
+  "If ASSERTION evaluates to NIL, call ERROR-PARSING as appropriate"
+  `(unless ,assertion
+     (error-parsing ,form ,@error-arguments)))
+
+
+(defun parse-define-alias (form)
+  (declare (type cons form)
+           (values alias-definition symbol-list))
+  "Parses a DEFINE-ALIAS form and returns a ALIAS-DEFINITION"
+  (assert-parsing form (and (<= 3 (length form) 4)
+                            (eq 'coalton:define-alias (first form)))
+    "Malformed DEFINE-ALIAS")
+  (let* ((alias          (alexandria:ensure-list (second form)))
+         (docstring      (and (= (length form) 4) (third form)))
+         (aliased        (if docstring (fourth form) (third form))))
+    (assert-parsing alias     (non-keyword-symbol-p (first alias)) "Malformed alias name")
+    (assert-parsing docstring (typep docstring '(or string null)) "Malformed docstring")
+    (check-type-vars alias aliased)
+    (values (make-alias-definition :alias alias :docstring docstring :aliased aliased)
+            (collect-types aliased))))
+
+(defun parse-define-type (form)
+  (declare (type cons form)
+           (values partial-type-definition symbol-list))
+  "Parses a DEFINE-TYPE and returns a PARTIAL-TYPE-DEFINITION and a list of type names on which it depends"
+  (assert-parsing form (and (<= 2 (length form))
+                            (eq 'coalton:define-type (first form)))
+    "Malformed DEFINE-TYPE")
+
+  (let* ((type         (alexandria:ensure-list (second form)))
+         (docstring    (and (stringp (third form)) (third form)))
+         (constructors (if docstring (cdddr form)  (cddr form))))
+
+    (with-parsing-context ("definition of type ~A" (first type))
+      (assert-parsing type (non-keyword-symbol-p (first type)) "Malformed type name")
+      (check-type-vars type constructors)
+
+      (let ((dups (duplicates constructors :key #'car)))
+        (unless (null dups)
+          (error-parsing dups "Duplicate constructor~P" (length dups)))))
+
+    (values
+     (make-partial-type-definition
+      :name type
+      :constructors constructors :docstring docstring)
+     (mapcan (alexandria:compose #'collect-types #'cdr) constructors))))
+
+(defun parse-definition (form)
+  (declare (type cons form)
+           (values (or partial-type-definition alias-definition)))
+  (case (first form)
+    ((coalton:define-type)  (parse-define-type form))
+    ((coalton:define-alias) (parse-define-alias form))
+    (t                      (error-parsing form "Unknown definition operator"))))
 
 (defun parse-type-definitions (forms repr-table env)
   "Parse the type defintion FORM in the ENVironment
@@ -201,104 +255,30 @@ Returns TYPE-DEFINITIONS"
            (values type-definition-list))
 
   ;; Pull out and verify DEFINE-TYPE and type
-  (let ((type-definitions nil) ; list (name tvars constructors docstring)
-        (type-dependencies)    ; list (name dependencies*)
-        )
+  (let (defined-types type-dependencies)
+    ;; defined-types is a list of type definition forms
+    ;; type dependencies is an association list of type names to that type's dependencies names
     (dolist (form forms)
-      (assert (and (eql 'coalton:define-type (first form))
-                   (<= 2 (length form))
-                   (or (listp (second form))
-                       (symbolp (second form))))
-          () "Malformed DEFINE-TYPE form ~A" form)
-      (destructuring-bind (def-type type &rest ctors) form
-        (declare (ignore def-type))
-        ;; Pull bare symbols into a list for easier parsing
-        (setf type (alexandria:ensure-list type))
-
-        ;; Pull out the type name and type variables
-        (destructuring-bind (tycon-name &rest tyvar-names) type
-          (assert (and (symbolp tycon-name)
-                       (every #'symbolp tyvar-names))
-              () "Malformed DEFINE-TYPE type ~A" type)
-
-          ;; Push this tycon onto the list
-          (let (;; If the first ctor is a string then it is the docstring and we should skip it.
-                (constructors
-                  (mapcar #'alexandria:ensure-list
-                          (if (stringp (car ctors))
-                              (cdr ctors)
-                              ctors)))
-
-                ;; Pull out the docstring if it exists
-                (docstring
-                  (when (stringp (car ctors))
-                    (car ctors))))
-
-            (with-parsing-context ("definition of type ~A" tycon-name)
-              ;; Check for invalid type variables
-              (unless (every (lambda (var)
-                               (equalp (symbol-package var)
-                                       keyword-package))
-                             tyvar-names)
-                (error-parsing form "type variables must all be in the KEYWORD package."))
-
-              ;; Check for duplicate constructors
-              (labels ((check-for-duplicate-constructors (ctors)
-                         (if (find (car (car ctors)) (rest ctors) :key #'car :test #'equalp)
-                             (error-parsing form "duplicate constructor ~A" (car (car ctors)))
-                             (when (rest ctors)
-                               (check-for-duplicate-constructors (rest ctors))))))
-                (check-for-duplicate-constructors constructors))
-
-              ;; Check for duplicate type variables
-              (labels ((check-for-duplicate-type-variables (tyvar-names)
-                         (if (find (car tyvar-names) (rest tyvar-names) :test #'equalp)
-                             (error-parsing form "duplicate type variable ~S" (car tyvar-names))
-                             (when (rest tyvar-names) 
-                               (check-for-duplicate-type-variables (rest tyvar-names))))))
-                (check-for-duplicate-type-variables tyvar-names))
-
-              ;; Check for type variables appearing in constructors but not in the type
-              (loop :for (ctor-name . fields) :in constructors
-                    :do (loop :for field :in fields
-                              :for field-tyvars := (collect-type-vars field)
-                              :do (loop :for field-tyvar :in field-tyvars
-                                        :do (unless (find field-tyvar tyvar-names :test #'equalp)
-                                              (error-parsing
-                                               form
-                                               "type variable ~S appears in constructor ~A but not in type"
-                                               field-tyvar
-                                               ctor-name))))))
-
-            (push
-             (partial-define-type
-              :name tycon-name
-              :tyvar-names tyvar-names
-              :constructors constructors
-              :docstring docstring)
-             type-definitions)
-
-            (push
-             (cons
-              tycon-name
-              (remove-duplicates
-               (loop :for (name . args) :in constructors
-                     :append (collect-types args))
-               :test #'equalp))
-             type-dependencies)))))
-
-
-    (let* ((translation-unit-types (mapcar #'car type-dependencies))
-
-           (type-dependencies
-             (loop :for (name . deps) :in type-dependencies
-                   :collect (cons name (intersection deps translation-unit-types))))
-
-           (parsed-tcons
+      (multiple-value-bind (type dependencies) (parse-definition form)
+        (push type defined-types)
+        (push (cons (definition-name type) dependencies) type-dependencies)))
+                            
+    (let* ((parsed-tcons
              (loop :for scc :in (reverse (tarjan-scc type-dependencies))
-                   :for partial-types
-                     := (loop :for type-name :in scc
-                              :collect (find type-name type-definitions :test #'equalp :key #'partial-define-type-name))
+                   :for scc-types
+                     := (mapcar (cut find <> type-definitions :key #'definition-name) scc)
+                   :for aliases
+                     := (remove-if-not #'alias-definition-p scc-types)
+                   :for alias-dependencies
+                     := (mapcar (lambda (name) (intersection (mapcar #'definition-name aliases)
+                                                        (cdr (assoc (definition-name name) type-dependencies))))
+                                aliases)
+                   :do (dolist (alias-scc (tarjan-scc alias-dependencies))
+                         (assert (< (length alias-scc) 2) ()
+                                 "Cannot typecheck mutually recursive type aliases ~A" alias-scc)
+                         (let ((alias (first alias-scc)))
+                           (assert (null (find alias (cdr (assoc alias alias-dependencies)))) ()
+                                   "Cannot typecheck recursive type alias ~A" alias)))
                    :append (multiple-value-bind (data new-env)
                                (parse-type-impls partial-types env)
                              (setf env new-env)
@@ -315,9 +295,10 @@ Returns TYPE-DEFINITIONS"
 
                      ;; If every constructor entry has an arity of 0
                      ;; then this type can be compiled as an enum
-                     (enum-type (every (lambda (ctor)
-                                         (= 0 (constructor-entry-arity ctor)))
-                                       parsed-ctors))
+                     (enum-type (every
+                                 (lambda (ctor)
+                                   (zerop (constructor-entry-arity ctor)))
+                                 parsed-ctors))
 
                      ;; If there is a single constructor with a single
                      ;; field then this type can be compiled as a
@@ -410,7 +391,8 @@ Returns TYPE-DEFINITIONS"
                     :docstring docstring)))))))))
 
 (defun rewrite-ctor (ctor)
-  (assert (= 0 (constructor-entry-arity ctor)))
+  (declare (type constructor-entry ctor))
+  (assert-parsing ctor (= 0 (constructor-entry-arity ctor)) "Malformed constructor")
   (make-constructor-entry
    :name (constructor-entry-name ctor)
    :arity (constructor-entry-arity ctor)

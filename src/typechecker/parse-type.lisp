@@ -117,33 +117,32 @@
     (multiple-value-bind (ty ksubs) (parse-type-expr-inner env expr type-vars ksubs)
       (values (apply-ksubstitution ksubs ty) ksubs))))
 
-(defun collect-type-vars (expr)
-  (let ((type-vars nil))
-    (labels ((inner (expr)
-               (etypecase expr
-                 (symbol
-                  (when (equalp keyword-package (symbol-package expr))
-                    (push expr type-vars)))
+(defun non-keyword-symbol-p (sym)
+  "T IFF SYM is a symbol which is not a keyword"
+  (and (symbolp sym) (not (keywordp sym))))
 
-                 (list
-                  (loop :for elem :in expr
-                        :do (inner elem))))))
-      (inner expr)
-      (remove-duplicates type-vars :test #'equalp))))
+(defun collect-type-vars (expr)
+  "Returns all keywords in EXPR"
+  (remove-if-not #'keywordp (alexandria:flatten expr)))
 
 (defun collect-types (expr)
-  (let ((types nil))
-    (labels ((inner (expr)
-               (etypecase expr
-                 (symbol
-                  (when (not (equalp keyword-package (symbol-package expr)))
-                    (push expr types)))
+  "Returns all non-keyword atoms in EXPR"
+  (remove-if-not #'non-keyword-symbol-p (alexandria:flatten expr)))
 
-                 (list
-                  (loop :for elem :in expr
-                        :do (inner elem))))))
-      (inner expr)
-      (remove-duplicates types :test #'equalp))))
+(defun check-type-vars (defines uses)
+  (declare (type list defines)
+           (type list uses))
+  "Given a form which defines type-variables and a list of forms which use them, checks that all of the type variables are defined, used, well-formed and unique"
+  (macrolet ((check-for (problem bad-elements)
+               (alexandria:once-only (bad-elements)
+                 `(assert-parsing defines (null ,bad-elements)
+                    "~S type variable~P: ~A" ,problem (length ,bad-elements) ,bad-elements))))
+    (let ((used    (collect-type-vars uses))
+          (defined (collect-type-vars defines)))
+      (check-for "Malformed" (remove-if #'keywordp defined))
+      (check-for "Duplicate" (remove-if (lambda (i) (= 1 (count i defined))) defined))
+      (check-for "Undefined" (set-difference used defined))
+      (check-for "Unused"    (set-difference defined used)))))
 
 (defun parse-qualified-type-expr (env expr type-vars ksubs)
   "Parse qualified type expression EXPR in type environment ENV"
